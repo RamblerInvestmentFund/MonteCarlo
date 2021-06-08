@@ -13,8 +13,8 @@ weights_file <- read.xlsx("weights.xlsx", sheet = "Weights")
 t <- weights_file$Tickers
 w <- weights_file$Weights 
 
-# MONTE CARLO SIMULATION FUNCTION #
-mc.simulate <- function(symbols, weights, from, to, days_pred = 3*252, init_invest = 1, nsim = 101){
+##### MONTE CARLO SIMULATION FUNCTION #####
+mc.simulate <- function(symbols, weights, from, to, return_period = "daily", duration_pred = 3*252, init_invest = 1, nsim = 101){
   # Pulling prices from yahoo & reformatting
   prices <- 
     tq_get(symbols, get= "stock.prices", 
@@ -31,15 +31,28 @@ mc.simulate <- function(symbols, weights, from, to, days_pred = 3*252, init_inve
   colnames(prices_mod) <- symbols
   rownames(prices_mod) <- prices$date[1:NROW(prices_mod)]
   
-  # Calculate long-term returns
-  asset_returns_long <-  
-    prices_mod %>% 
-    to.daily(OHLC = FALSE) %>% 
-    tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
-    gather(asset, returns, -date) %>% 
-    group_by(asset) %>%  
-    mutate(returns = (log(returns) - log(lag(returns)))) %>% 
-    na.omit()
+  if (tolower(return_period) == "daily"){
+    # Calculate long-term returns
+    asset_returns_long <-  
+      prices_mod %>% 
+      to.daily(OHLC = FALSE) %>% 
+      tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
+      gather(asset, returns, -date) %>% 
+      group_by(asset) %>%  
+      mutate(returns = (log(returns) - log(lag(returns)))) %>% 
+      na.omit()
+  } else if (tolower(return_period) == "monthly"){
+    asset_returns_long <-  
+      prices_mod %>% 
+      to.monthly(OHLC = FALSE) %>% 
+      tk_tbl(preserve_index = TRUE, rename_index = "date") %>%
+      gather(asset, returns, -date) %>% 
+      group_by(asset) %>%  
+      mutate(returns = (log(returns) - log(lag(returns)))) %>% 
+      na.omit()
+  } else{
+    errorCondition('Not a valid return period. Please use "daily" or "monthly"')
+  }
   
   # Isolating returns of individual assets
   returns <- data.frame(matrix(nrow = NROW(asset_returns_long)/length(symbols), 
@@ -53,10 +66,10 @@ mc.simulate <- function(symbols, weights, from, to, days_pred = 3*252, init_inve
   rownames(returns) <- asset_returns_long$date[1:NROW(returns)]
   
   # simulating returns
-  portfolio_sim_growth <- data.frame(matrix(nrow = days_pred + 1, ncol = nsim))
+  portfolio_sim_growth <- data.frame(matrix(nrow = duration_pred + 1, ncol = nsim))
   for (i in 1:nsim){
     ## Create Simulated daily returns for specified number of days using mean and std
-    simulated_daily_returns <- rmvnorm(n = days_pred, 
+    simulated_daily_returns <- rmvnorm(n = duration_pred, 
                                        mean = colMeans(returns), sigma = cov(returns), 
                                        method = "eigen")
     simulated_daily_returns <- rbind(rep(init_invest, NCOL(simulated_daily_returns)),
@@ -78,8 +91,9 @@ mc.simulate <- function(symbols, weights, from, to, days_pred = 3*252, init_inve
 
 # Testing MC sim function:
 test_sim <- mc.simulate(symbols = t, weights = w, from = "2016-12-31", to = "2018-12-31",
-                        init_invest = 10000,
-                        days_pred = 3*252,
+                        init_invest = 1,
+                        return_period = "daily",
+                        duration_pred = 3*252,
                         nsim = 101)
 
 # Simulation Statistics Histograms
@@ -87,33 +101,37 @@ hist(apply(test_sim, 2, mean))
 hist(apply(test_sim, 2, sd))
 
 
-# CAGR FUNCTION #
-mc.cagr <- function(vec){
-  cagr <- round(((vec[length(vec)]^(1/10)) - 1) * 100, 2)
+##### CAGR FUNCTION #####
+mc.cagr <- function(vec, period = "daily"){
+  if (period == "daily"){
+    cagr <- round((((vec[length(vec)]/vec[1])^(1/(length(vec)/252))) - 1) * 100, 2)
+  } else if (period == "monthly"){
+    cagr <- round((((vec[length(vec)]/vec[1])^(1/(length(vec)/12))) - 1) * 100, 2)
+  }
   return(cagr)
 }
 
 # Testing MC sim CAGR function:
-sim_cagr <- apply(test_sim, 2, mc.cagr)
-print(sim_cagr)
+sim_cagr <- mapply(mc.cagr, test_sim, "monthly")
+summary(sim_cagr)
 
-# CHARTS FUNCTION #
+##### CHARTS FUNCTION #####
 mc.plot <- function(x, min.max.med = FALSE){
   # Plotting with hchart
   if (min.max.med == FALSE){
     # Data preparation
     data <- data.frame(stack(x[,1:NCOL(x)]))
     data$id <- as.character(rep(seq(1, NROW(x)), NCOL(x)))
-    colnames(data) <- c("Growth", "Simulation", "Day")
+    colnames(data) <- c("Growth", "Simulation", "Period")
     
     # Plotting simulations
     plt <- hchart(data,
                   type = 'line',
-                  mapping = hcaes(x = Day,
+                  mapping = hcaes(x = Period,
                                   y = Growth,
                                   group = Simulation)) %>%
       hc_title(text = list("Simulated Portfolio Value")) %>%
-      hc_xAxis(title = list(text = "Days")) %>%
+      hc_xAxis(title = list(text = "Period")) %>%
       hc_yAxis(title = list(text = "Portfolio Growth"),
                labels = list(format = "${value}"))  %>%
       hc_add_theme(hc_theme_flat()) %>%
@@ -131,16 +149,16 @@ mc.plot <- function(x, min.max.med = FALSE){
     
     data3m <- data.frame(stack(x3m[,1:NCOL(x3m)]))
     data3m$id <- as.character(rep(seq(1, NROW(x3m)), NCOL(x3m)))
-    colnames(data3m) <- c("Growth", "Simulation", "Day")
+    colnames(data3m) <- c("Growth", "Simulation", "Period")
     
     # Plotting simulations
     plt <- hchart(data3m,
                   type = 'line',
-                  mapping = hcaes(x = Day,
+                  mapping = hcaes(x = Period,
                                   y = Growth,
                                   group = Simulation)) %>%
       hc_title(text = list("Simulated Portfolio Value")) %>%
-      hc_xAxis(title = list(text = "Days")) %>%
+      hc_xAxis(title = list(text = "Period")) %>%
       hc_yAxis(title = list(text = "Portfolio Growth"),
                labels = list(format = "${value}"))  %>%
       hc_add_theme(hc_theme_flat()) %>%
@@ -154,9 +172,3 @@ mc.plot <- function(x, min.max.med = FALSE){
 
 # mc.plot(x = test_sim)
 mc.plot(x = test_sim, min.max.med = TRUE)
-
-
-
-
-
-
